@@ -96,12 +96,13 @@ def main():
 
     # State Variables for Edge Loop
     last_trigger_time = 0.0
-    min_trigger_interval = 1.2  # Seconds minimum between consecutive inspections
+    min_trigger_interval = 1.0  # Seconds minimum between consecutive inspections
     last_simulate_time = time.time()
     last_actuation_time = 0.0
     pending_resume = False
     inspection_counter = 0
-
+    sensor_armed = False  # Edge-triggered latch: only trigger once per object
+    beam_clear_count = 0
     print("\n✅ NusaQC Edge Node is running and waiting for conveyor sensor triggers.")
     print("   [Trigger: GPIO 17 Active LOW (E18-D80NK) or simulation timer]\n")
 
@@ -118,12 +119,21 @@ def main():
             # Check for trigger condition
             sensor_triggered = False
 
-            # A. Physical IR Sensor check (Active LOW)
-            if gpio.is_fish_present():
-                if (current_time - last_trigger_time) >= min_trigger_interval:
-                    sensor_triggered = True
-                    print(f"⚡ [SENSOR] IR Sensor triggered on GPIO 17! Object detected.")
-
+            # A. Physical IR Sensor check (Edge-Triggered Falling Edge with Debounce)
+            is_present = gpio.is_fish_present()
+            if not is_present:
+                beam_clear_count += 1
+                if beam_clear_count >= 3:  # Stably clear for >= 60ms
+                    sensor_armed = True
+            else:
+                beam_clear_count = 0
+                if sensor_armed and (current_time - last_trigger_time) >= min_trigger_interval:
+                    # Debounce confirmation: verify stable LOW for 30ms to reject contact jitter/EMI
+                    time.sleep(0.03)
+                    if gpio.is_fish_present():
+                        sensor_triggered = True
+                        sensor_armed = False  # Disarm until object completely leaves the sensor
+                        print(f"⚡ [SENSOR] IR Sensor triggered on GPIO 17! Object detected.")
             # B. Simulated trigger timer (if configured)
             if not sensor_triggered and args.simulate_trigger > 0:
                 if (current_time - last_simulate_time) >= args.simulate_trigger:
@@ -210,11 +220,7 @@ def main():
                 except Exception as e:
                     print(f"⚠️ Telemetry dispatch error: {e}")
 
-                # Wait for IR beam to clear before next iteration to avoid debounce re-trigger
-                debounce_wait = 0.0
-                while gpio.is_fish_present() and debounce_wait < 1.0:
-                    time.sleep(0.05)
-                    debounce_wait += 0.05
+                # Sensor state machine automatically requires beam clearance before re-arming
 
             time.sleep(0.02)  # 50 Hz polling rate for IR sensor responsiveness
 
